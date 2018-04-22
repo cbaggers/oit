@@ -11,8 +11,6 @@
 (defvar *solid-col-sampler* nil)
 (defvar *projection* nil)
 
-
-
 ;;----------------------------------------------------------------------
 
 (defpipeline-g pline-0 ()
@@ -38,7 +36,7 @@
   :fragment
   (lambda-g ((uv :vec2)
              &uniform (sam :sampler-2d))
-    (texture sam uv)))
+    (saturate (texture sam uv))))
 
 (defun blit (sampler)
   (map-g #'pline-blit (get-quad-stream-v2)
@@ -64,7 +62,22 @@
   (setf *solid-fbo* (make-fbo (list 0 :element-type :vec4)
                               :d))
   (setf *solid-col-sampler*
-          (sample (attachment-tex *solid-fbo* 0))))
+        (sample (attachment-tex *solid-fbo* 0)))
+  ;;
+  (bavoil-myers-init))
+
+;;----------------------------------------------------------------------
+;; Ordered
+
+(defvar *one-min-alpha*
+  (make-blending-params))
+
+(defun draw-ordered ()
+  (as-frame
+    (sphere (v! 0 -1 -9) *red*)
+    (with-blending *one-min-alpha*
+      (sphere (v! -0.3 -1 -7) *blue*)
+      (sphere (v! 0.4 -1 -5) *green*))))
 
 ;;----------------------------------------------------------------------
 ;; Meshkin
@@ -114,10 +127,122 @@
         (transparent-sphere-meshkin (v! -0.3 -1 -7) *blue*)))))
 
 (defun draw-meshkin ()
-  (as-frame
-    (draw-opaque)
-    (draw-transparent-meshkin)
-    (blit *solid-col-sampler*)))
+  (draw-opaque)
+  (draw-transparent-meshkin)
+  (blit *solid-col-sampler*))
+
+;;----------------------------------------------------------------------
+;; Bavoil and Myers
+
+(defvar *bavoil-myers-fbo* nil)
+(defvar *bavoil-myers-col0-sampler* nil)
+(defvar *bavoil-myers-col1-sampler* nil)
+
+(defun bavoil-myers-init ()
+  (when *bavoil-myers-fbo*
+    (free (attachment-tex *bavoil-myers-fbo* 0))
+    ;; dont free depth as it is from solid
+    (free *bavoil-myers-fbo*))
+  (setf *bavoil-myers-fbo* (make-fbo (list 0 :element-type :vec4)
+                                    (list 1 :element-type :vec4)
+                                    (list :d (attachment-tex *solid-fbo* :d))))
+  (setf *bavoil-myers-col0-sampler*
+        (sample (attachment-tex *bavoil-myers-fbo* 0)))
+  (setf *bavoil-myers-col1-sampler*
+        (sample (attachment-tex *bavoil-myers-fbo* 0))))
+
+(defpipeline-g pline-bavoil-myers-0 ()
+  :vertex
+  (lambda-g ((vert g-pnt)
+             &uniform
+             (offset :vec3)
+             (color :vec4)
+             (proj :mat4))
+    (let ((pos3 (pos vert)))
+      (values
+       (* proj (v! (+ pos3 offset) 1))
+       color)))
+  :fragment
+  (lambda-g ((color :vec4)
+             &uniform
+             (sam :sampler-2d))
+    (let ((c0 (s~ (texel-fetch sam
+                               (ivec2 (s~ gl-frag-coord :xy))
+                               0)
+                  :xyz)))
+      (values color (vec4 1)))))
+
+(defun trans-sphere-bavoil-meyers-accum (offset color)
+  (map-g #'pline-bavoil-myers-0 *sphere*
+         :offset offset
+         :color color
+         :proj *projection*
+         :sam *solid-col-sampler*))
+
+(defun bavoil-myers-accum ()
+  (with-setf (depth-mask) nil
+    (with-blending *blend-one-one*
+      (with-fbo-bound (*bavoil-myers-fbo*)
+        (clear-fbo *bavoil-myers-fbo*)
+        (trans-sphere-bavoil-meyers-accum (v! 0.4 -1 -5) *green*)
+        (trans-sphere-bavoil-meyers-accum (v! -0.3 -1 -7) *blue*)))))
+
+(defpipeline-g bavoil-myers-compose-pline ()
+  :vertex
+  (lambda-g ((vert g-pnt)
+             &uniform
+             (offset :vec3)
+             (color :vec4)
+             (proj :mat4))
+    (let ((pos3 (pos vert)))
+      (values
+       (* proj (v! (+ pos3 offset) 1))
+       color)))
+  :fragment
+  (lambda-g ((color :vec4)
+             &uniform
+             (solid-sam :sampler-2d)
+             (accum-sam :sampler-2d)
+             (count-sam :sampler-2d))
+    (flet ((fetch ((s :sampler-2d))
+             (texel-fetch s
+                          (ivec2 (s~ gl-frag-coord :xy))
+                          0)))
+      (let ((accum (fetch accum-sam))
+            (n (max 1f0 (x (fetch accum-sam)))))
+        (v! (/ (s~ accum :xyz) (max (w accum) 0.0001))
+            (expt (max 0f0 (- 1f0 (/ (w accum) n)))
+                  n))))))
+
+(defun bavoil-myers-compose-sphere (offset color)
+  (map-g #'bavoil-myers-compose-pline
+         *sphere*
+         :offset offset
+         :color color
+         :proj *projection*
+         :solid-sam *solid-col-sampler*
+         :accum-sam *bavoil-myers-col0-sampler*
+         :count-sam *bavoil-myers-col1-sampler*))
+
+(defvar *bavoil-myers-blend*
+  (make-blending-params
+   :source-rgb :one-minus-src-alpha
+   :source-alpha :one-minus-src-alpha
+   :destination-rgb :src-alpha
+   :destination-alpha :src-alpha))
+
+(defun bavoil-myers-compose ()
+  (with-fbo-bound (*solid-fbo*)
+    (with-blending *bavoil-myers-blend*
+      (bavoil-myers-compose-sphere (v! 0.4 -1 -5) *green*)
+      (bavoil-myers-compose-sphere (v! -0.3 -1 -7) *blue*))))
+
+
+(defun draw-bavoil-myers ()
+  (draw-opaque)
+  (bavoil-myers-accum)
+  (bavoil-myers-compose)
+  (blit *solid-col-sampler*))
 
 ;;----------------------------------------------------------------------
 
@@ -130,10 +255,13 @@
 (defun draw-opaque ()
   (with-fbo-bound (*solid-fbo*)
     (clear-fbo *solid-fbo*)
-    (sphere (v! 0 -1 -9) (v! 1 0 0 0))))
+    (sphere (v! 0 -1 -9) *red*)))
 
 (defun step-main ()
-  (draw-meshkin))
+  (as-frame
+    ;;(draw-ordered)
+    ;;(progn (clear) (draw-meshkin))
+    (progn (clear) (draw-bavoil-myers))))
 
 (def-simple-main-loop oit (:on-start #'init)
   (step-main))
