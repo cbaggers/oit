@@ -5,7 +5,11 @@
   :author "Your Name <your.name@example.com>"
   :license  "Specify license here"
   :version "0.0.1"
-  :depends-on (:cepl.sdl2 :rtg-math :nineveh :skitter)
+  :depends-on (:cepl.sdl2
+               :rtg-math
+               :nineveh
+               :skitter
+               :with-setf)
   :serial t
   :components ((:file "package")
                (:file "main")))
