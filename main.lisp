@@ -247,6 +247,7 @@
 (defvar *boit-col1-sampler* nil)
 
 (defun boit-init ()
+  (setf (clear-color) (v! 0.03 0.03 0.05 1))
   (when *boit-fbo*
     (free (attachment-tex *boit-fbo* 0))
     ;; dont free depth as it is from solid
@@ -264,8 +265,8 @@
         (make-blending-params
          :source-rgb :zero
          :source-alpha :zero
-         :destination-rgb :one-minus-src-alpha
-         :destination-alpha :one-minus-src-alpha))
+         :destination-rgb :one-minus-src-color
+         :destination-alpha :one-minus-src-color))
   (setf *boit-col0-sampler*
         (sample (attachment-tex *boit-fbo* 0)))
   (setf *boit-col1-sampler*
@@ -282,45 +283,32 @@
 
 (defun clear-accum ()
   (with-fbo-bound (*boit-fbo* :with-blending nil)
-    (clear-fbo *boit-fbo*)
-    (with-setf (depth-mask) nil
-      (map-g #'boit-clear (get-quad-stream-v2)))))
+    (clear-fbo *boit-fbo*) ;; could just clear depth
+    (map-g #'boit-clear (get-quad-stream-v2))))
 
-;; float weight =
-;;   pow(alpha + 0.01f, 4.0f) +
-;;   max(0.01f,
-;;       min(3000.0f, 0.3f / (0.00001f + pow(abs(z) / 200.0f, 4.0f))));
-
-(defun-g depth-estimator-0 ((depth :float) (alpha :float))
-  (+ (expt (+ alpha 0.01) 4f0)
-     (max 0.01f0
-          (min 3000f0 (/ 0.3f0 (+ 0.00001f0
-                                 (expt (/ (abs depth) 200f0)
-                                       4f0)))))))
-;; - - - - - - - - - - - - - - - - - - - - - - - - - - -
+(defun-g depth-estimator-0 ((linear-depth :float) (alpha :float))
+  (clamp (/ 0.03 (+ 0.00001 (expt linear-depth 4f0))) 0.01 3000.0))
 
 (defpipeline-g boit-accum-sphere-pline ()
   :vertex
   (lambda-g ((vert g-pnt)
              &uniform
              (offset :vec3)
-             (color :vec4)
              (proj :mat4))
     (let* ((pos3 (pos vert))
            (clip-pos (* proj (v! (+ pos3 offset) 1))))
-      (values clip-pos color
-              (- (z clip-pos)))))
+      clip-pos))
   :fragment
-  (lambda-g ((color :vec4) (z :float))
+  (lambda-g (&uniform (color :vec4))
     (let* ((ci (s~ color :xyz))
            (ai (w color))
-           ;; fudging
-           (z (* z 500f0))
-           ;;
-           (weight (depth-estimator-0 z ai)))
+           (view-depth (abs (/ 1f0 (w gl-frag-coord))))
+           (depth-scale 0.1) ;; between 0.1 & 1
+           (linear-depth (* view-depth depth-scale))
+           (weight (depth-estimator-0 linear-depth ai)))
       (values
-       (v! (* ci ai weight) ai)
-       (vec4 (* ai weight))))))
+       (* (v! (* ci ai) ai) weight)
+       (vec4 ai)))))
 
 (defun boit-accum-sphere (offset color)
   (map-g #'boit-accum-sphere-pline *sphere*
@@ -332,9 +320,8 @@
 ;;
 (defun boit-accum ()
   (with-fbo-bound (*boit-fbo*)
-    (with-setf (depth-mask) nil
-      (boit-accum-sphere (v! 0.4 -1 -5) *green*)
-      (boit-accum-sphere (v! -0.3 -1 -7) *blue*))))
+    (boit-accum-sphere (v! 0.4 -1 -5) *green*)
+    (boit-accum-sphere (v! -0.3 -1 -7) *blue*)))
 
 (defpipeline-g boit-composite-pline ()
   :vertex
@@ -344,38 +331,30 @@
   :fragment
   (lambda-g ((uv :vec2)
              &uniform
+             (solid-sam :sampler-2d)
              (accum-sam :sampler-2d)
              (revealage-sam :sampler-2d))
-    (let* ((accum (texture accum-sam uv))
-           (accum-rgb (s~ accum :xyz))
+    (let* ((solid (s~ (texture solid-sam uv) :xyz))
+           (accum (texture accum-sam uv))
            (reveal (x (texture revealage-sam uv)))
-           (transparent (v! (/ accum-rgb (clamp reveal 0.0001 50000.0))
-                            (w accum))))
-      (if (>= (w accum) 1.0)
-          (discard) ;;(vec4 1)
-          (transparent)))))
 
-(defvar *boit-composite-blend*
-  (make-blending-params
-   :source-rgb :one-minus-src-alpha
-   :source-alpha :one-minus-src-alpha
-   :destination-rgb :src-alpha
-   :destination-alpha :src-alpha))
+           (avg-color (/ (s~ accum :xyz) (max (w accum) 0.00001))))
+      (v! (+ (* avg-color (- 1f0 reveal))
+             (* solid reveal))
+          1))))
 
-(defun boit-composite ()
-  (progn ;;with-fbo-bound (*solid-fbo* :with-blending nil)
-    (progn;;with-blending *boit-composite-blend*
-      (with-setf (depth-mask) nil
-        (map-g #'boit-composite-pline (get-quad-stream-v2)
-               :accum-sam *boit-col0-sampler*
-               :revealage-sam *boit-col1-sampler*)))))
+(defun boit-composite-and-blit ()
+  (map-g #'boit-composite-pline (get-quad-stream-v2)
+         :solid-sam *solid-col-sampler*
+         :accum-sam *boit-col0-sampler*
+         :revealage-sam *boit-col1-sampler*))
 
 (defun draw-boit ()
   (draw-opaque)
-  (clear-accum)
-  (boit-accum)
-  (boit-composite)
-  ;;(blit *solid-col-sampler*)
+  (with-setf (depth-test-function) nil
+    (clear-accum)
+    (boit-accum)
+    (boit-composite-and-blit))
   ;; (draw-tex-tl *boit-col0-sampler*)
   ;; (draw-tex-tr *boit-col1-sampler*)
   ;; (boit-accum-sphere (v! 0.4 -1 -5) *green*)
