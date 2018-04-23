@@ -1,9 +1,9 @@
 # oit
-### _Your Name <your.name@example.com>_
 
-This is a project to do ... something.
+Just a project where I work experiment with order independent transparency.
 
-## License
+Based on these resources:
 
-Specify license here
-
+- the intro: http://casual-effects.blogspot.no/2014/03/weighted-blended-order-independent.html
+- the paper: http://jcgt.org/published/0002/02/09/paper.pdf
+- the nvidia code which actually worked: https://github.com/NVIDIAGameWorks/GraphicsSamples/tree/master/samples/gl4-kepler/WeightedBlendedOIT
